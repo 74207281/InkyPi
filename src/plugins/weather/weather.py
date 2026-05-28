@@ -155,8 +155,6 @@ class Weather(BasePlugin):
         template_params["last_refresh_time"] = last_refresh_time
 
         image = self.render_image(dimensions, "weather.html", "weather.css", template_params)
-        print(template_params)
-        # breakpoint()
 
         if not image:
             raise RuntimeError("Failed to take screenshot, please check logs.")
