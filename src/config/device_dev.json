@@ -34,16 +34,54 @@
                 "name": "Default",
                 "start_time": "00:00",
                 "end_time": "24:00",
-                "plugins": [],
-                "current_plugin_index": null
+                "plugins": [
+                    {
+                        "plugin_id": "weather",
+                        "name": "weather",
+                        "plugin_settings": {
+                            "latitude": "25.1493",
+                            "longitude": "121.7287",
+                            "weatherProvider": "OpenMeteo",
+                            "units": "metric",
+                            "titleSelection": "custom",
+                            "customTitle": "ZhongShan",
+                            "graphIconStep": "2",
+                            "forecastDays": "3",
+                            "selectedFrame": "Corner",
+                            "topMargin": "",
+                            "bottomMargin": "",
+                            "leftMargin": "",
+                            "rightMargin": "",
+                            "backgroundOption": "color",
+                            "backgroundColor": "#ffffff",
+                            "textColor": "#000000"
+                        },
+                        "refresh": {
+                            "interval": 60
+                        },
+                        "latest_refresh_time": null
+                    }
+                ],
+                "current_plugin_index": 0
             }
         ],
-        "active_playlist": null
+        "active_playlist": "Default"
     },
     "refresh_info": {
         "refresh_time": null,
         "image_hash": null,
         "refresh_type": null,
         "plugin_id": null
+    },
+    "inverted_image": null,
+    "log_system_stats": "on",
+    "timezone": "Asia/Taipei",
+    "time_format": "12h",
+    "plugin_cycle_interval_seconds": 60,
+    "image_settings": {
+        "saturation": 1.0,
+        "brightness": 1.0,
+        "sharpness": 1.0,
+        "contrast": 1.0
     }
 }

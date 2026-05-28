@@ -8,6 +8,8 @@ from astral import moon
 import pytz
 from io import BytesIO
 import math
+from shapely.geometry import shape, Point
+import geopandas as gpd
 
 logger = logging.getLogger(__name__)
         
@@ -48,9 +50,19 @@ UNITS = {
     }
 }
 
+# Forcast data link
+# 3 day forcast
+city_list = ['宜蘭縣','桃園市','新竹縣','苗栗縣','彰化縣','南投縣','雲林縣',
+             '嘉義縣','屏東縣','臺東縣','花蓮縣','澎湖縣','基隆市','新竹市',
+             '嘉義市','臺北市','高雄市','新北市','臺中市','臺南市','金門縣','連江縣']
+FORCAST_3_DAY = {name : f'F-D0047-{((i*4)+1):03d}' for i , name in enumerate(city_list)}
+FORCAST_7_DAY = {name : f'F-D0047-{((i*4)+3):03d}' for i , name in enumerate(city_list)}
+
 WEATHER_URL = "https://api.openweathermap.org/data/3.0/onecall?lat={lat}&lon={long}&units={units}&exclude=minutely&appid={api_key}"
 AIR_QUALITY_URL = "http://api.openweathermap.org/data/2.5/air_pollution?lat={lat}&lon={long}&appid={api_key}"
 GEOCODING_URL = "http://api.openweathermap.org/geo/1.0/reverse?lat={lat}&lon={long}&limit=1&appid={api_key}"
+# Forcast URLs for CWA data
+CWA_FORECAST_URL = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/"
 
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={long}&hourly=weather_code,temperature_2m,precipitation,precipitation_probability,relative_humidity_2m,surface_pressure,visibility&daily=weathercode,temperature_2m_max,temperature_2m_min,sunrise,sunset&current=temperature,windspeed,winddirection,is_day,precipitation,weather_code,apparent_temperature&timezone=auto&models=best_match&forecast_days={forecast_days}"
 OPEN_METEO_AIR_QUALITY_URL = "https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={long}&hourly=european_aqi,uv_index,uv_index_clear_sky&timezone=auto"
@@ -74,6 +86,8 @@ class Weather(BasePlugin):
     def generate_image(self, settings, device_config):
         lat = float(settings.get('latitude'))
         long = float(settings.get('longitude'))
+        county = settings.get('county')
+        district = settings.get('district')
         if not lat or not long:
             raise RuntimeError("Latitude and Longitude are required.")
 
@@ -84,7 +98,7 @@ class Weather(BasePlugin):
         weather_provider = settings.get('weatherProvider', 'OpenWeatherMap')
         title = settings.get('customTitle', '')
 
-        timezone = device_config.get_config("timezone", default="America/New_York")
+        timezone = device_config.get_config("timezone", default="Asia/Taipei")
         time_format = device_config.get_config("time_format", default="12h")
         tz = pytz.timezone(timezone)
 
@@ -109,6 +123,15 @@ class Weather(BasePlugin):
                 weather_data = self.get_open_meteo_data(lat, long, units, forecast_days + 1)
                 aqi_data = self.get_open_meteo_air_quality(lat, long)
                 template_params = self.parse_open_meteo_data(weather_data, aqi_data, tz, units, time_format, lat)
+            elif weather_provider == "CWA":
+                cwa_api = device_config.load_env_key("CWA_API_KEY")
+                moe_api = device_config.load_env_key("MOE_API_KEY")
+                if not cwa_api:
+                    raise RuntimeError("CWA API Key not configured.")
+                weather_forecast_data = self.get_cwa_forecast_data(cwa_api, units, county, district, lat, long)
+                weather_current_data = self.get_cwa_current_data(cwa_api, units, lat, long)
+                # aqi_data = self.get_air_quality(moe_api, lat, long)
+                template_params = self.parse_cwa_data(weather_forecast_data, weather_current_data ,units)
             else:
                 raise RuntimeError(f"Unknown weather provider: {weather_provider}")
 
@@ -132,6 +155,8 @@ class Weather(BasePlugin):
         template_params["last_refresh_time"] = last_refresh_time
 
         image = self.render_image(dimensions, "weather.html", "weather.css", template_params)
+        print(template_params)
+        breakpoint()
 
         if not image:
             raise RuntimeError("Failed to take screenshot, please check logs.")
@@ -189,7 +214,35 @@ class Weather(BasePlugin):
         
         data['hourly_forecast'] = self.parse_open_meteo_hourly(weather_data.get('hourly', {}), units, tz, time_format, daily.get('sunrise', []), daily.get('sunset', []))
         return data
+    
+    def parse_cwa_data(self, weather_forecast_data, weather_current_data, tz, units, time_format, lat):
+        current = weather_current_data['records']['Station'][0]['WeatherElement']
+        # daily = weather_forecast_data['records']['Locations'][0]['Location'][0]['WeatherElement']
+        # hourly = weather_data.get()
+        dt = datetime.fromisoformat(current.get('time')).astimezone(tz) if current.get('time') else datetime.now(tz)
+        weather_code = current.get("weather_code", 0)
+        is_day = current.get("is_day", 1)
+        current_icon = self.map_weather_code_to_icon(weather_code, is_day)
+        
+        temperature_conversion = 273.15 if units == "standard" else 0.
 
+        data = {
+            # "current_date": dt.strftime("%A, %B %d"),
+            # "current_day_icon": self.get_plugin_dir(f'icons/{current_icon}.png'),
+            # "current_temperature": str(round(current.get("temperature", 0) + temperature_conversion)),
+            # "feels_like": str(round(current.get("apparent_temperature", current.get("temperature", 0)) + temperature_conversion)),
+            # "temperature_unit": UNITS[units]["temperature"],
+            # "units": units,
+            # "time_format": time_format
+        }
+
+        data['forecast'] = self.parse_cwa_forecast(weather_forecast_data, units, tz, is_day, lat)
+        data['data_points'] = self.parse_cwa_data_points(current, aqi_data, units, tz, time_format)
+        
+        data['hourly_forecast'] = self.parse_cwa_hourly(weather_data.get('hourly', {}), units, tz, time_format, daily.get('sunrise', []), daily.get('sunset', []))
+        
+        return
+    
     def map_weather_code_to_icon(self, weather_code, is_day):
 
         icon = "01d" # Default to clear day icon
@@ -373,6 +426,55 @@ class Weather(BasePlugin):
             })
 
         return forecast
+
+    def parse_cwa_forecast(self, daily_data, units, tz, is_day, lat):
+        """
+        Parse the daily forecast from CWA API and calculate moon phase and illumination using the local 'astral' library.
+        """
+        times = daily_data.get('time', [])
+        weather_codes = daily_data.get('weathercode', [])
+        temp_max = daily_data.get('temperature_2m_max', [])
+        temp_min = daily_data.get('temperature_2m_min', [])
+        if units == "standard":
+            temp_max = [T + 273.15 for T in temp_max]
+            temp_min = [T + 273.15 for T in temp_min]
+
+        forecast = []
+
+        for i in range(0, len(times)): 
+            dt = datetime.fromisoformat(times[i]).replace(tzinfo=timezone.utc).astimezone(tz)
+            day_label = dt.strftime("%a")
+
+            code = weather_codes[i] if i < len(weather_codes) else 0
+            weather_icon = self.map_weather_code_to_icon(code, is_day=1)
+            weather_icon_path = self.get_plugin_dir(f"icons/{weather_icon}.png")
+
+            timestamp = int(dt.replace(hour=12, minute=0, second=0).timestamp())
+            target_date: date = dt.date() + timedelta(days=1)
+
+            try:
+                phase_age = moon.phase(target_date)
+                phase_name_north_hemi = get_moon_phase_name(phase_age)
+                LUNAR_CYCLE_DAYS = 29.530588853
+                phase_fraction = phase_age / LUNAR_CYCLE_DAYS
+                illum_pct = (1 - math.cos(2 * math.pi * phase_fraction)) / 2 * 100
+            except Exception as e:
+                logger.error(f"Error calculating moon phase for {target_date}: {e}")
+                illum_pct = 0
+                phase_name_north_hemi = "newmoon"
+            moon_icon_path = self.get_moon_phase_icon_path(phase_name_north_hemi, lat)
+
+            forecast.append({
+                "day": day_label,
+                "high": int(temp_max[i]) if i < len(temp_max) else 0,
+                "low": int(temp_min[i]) if i < len(temp_min) else 0,
+                "icon": weather_icon_path,
+                "moon_phase_pct": f"{illum_pct:.0f}",
+                "moon_phase_icon": moon_icon_path
+            })
+
+        return forecast
+
 
     def parse_hourly(self, hourly_forecast, tz, time_format, units, daily_forecast):
         hourly = []
@@ -771,6 +873,36 @@ class Weather(BasePlugin):
         
         return response.json()
     
+    def get_cwa_forecast_data(self, api_key, county, district, lat, long):
+        url = f"{CWA_FORECAST_URL}/{FORCAST_7_DAY.get(county)}"
+        param = {"Authorization" : api_key,
+                 "format" : "JSON",
+                 "LocationName" : district,
+                 }
+        response = requests.get(url, params=param, timeout=30)
+        if not 200 <= response.status_code < 300:
+            logger.error(f"Failed to retrieve CWA data: {response.content}")
+            raise RuntimeError("Failed to retrieve CWA data.")
+        return response.json()
+    
+    def get_cwa_current_data(self, api_key, county, district, lat, long):
+        url = f"{CWA_FORECAST_URL}/O-A0001-001"
+        # Find nearest station
+        # Station GPD path
+        gdf = gpd.read_file(os.path.join(self.get_plugin_dir('shp/station.geojson')))
+        input_point = Point(long, lat)
+        nearest_idx = gdf.distance(input_point, align=True).idxmin()
+        station_id = gdf.loc[nearest_idx]['站號']
+        param = {"Authorization" : api_key,
+                 "format" : "JSON",
+                 "StationId" : station_id,
+                 }
+        response = requests.get(url, params=param, timeout=30)
+        if not 200 <= response.status_code < 300:
+            logger.error(f"Failed to retrieve CWA data: {response.content}")
+            raise RuntimeError("Failed to retrieve CWA data.")
+        return response.json()
+
     def format_time(self, dt, time_format, hour_only=False, include_am_pm=True):
         """Format datetime based on 12h or 24h preference"""
         if time_format == "24h":
