@@ -156,7 +156,7 @@ class Weather(BasePlugin):
 
         image = self.render_image(dimensions, "weather.html", "weather.css", template_params)
         print(template_params)
-        breakpoint()
+        # breakpoint()
 
         if not image:
             raise RuntimeError("Failed to take screenshot, please check logs.")

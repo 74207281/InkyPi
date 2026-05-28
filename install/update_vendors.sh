@@ -13,7 +13,7 @@ declare -a VENDORS=(
   "Select2 JS|https://cdnjs.cloudflare.com/ajax/libs/select2/${SELECT2_VERSION}/js/select2.min.js|src/static/scripts/select2.min.js"
   "jQuery|https://code.jquery.com/jquery-${JQUERY_VERSION}.min.js|src/static/scripts/jquery.min.js"
   "Chart JS|https://cdn.jsdelivr.net/npm/chart.js|src/static/scripts/chart.js"
-  "Fullcalendar JS|https://cdn.jsdelivr.net/npm/fullcalendar@${FULLCALENDAR_VERSION}/index.global.min.js|src/static/scripts/calendar.min.js"
+  "Fullcalendar JS|https://cdn.jsdelivr.net/npm/fullcalendar/${FULLCALENDAR_VERSION}/index.global.min.js|src/static/scripts/calendar.min.js"
 )
 
 # Download each vendor file
