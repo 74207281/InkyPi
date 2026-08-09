@@ -14,6 +14,7 @@ import gc
 import psutil
 import tempfile
 import os
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -357,4 +358,3 @@ class AdaptiveImageLoader:
         logger.debug(f"Resizing from {img.size[0]}x{img.size[1]} to {dimensions[0]}x{dimensions[1]}")
 
         return ImageOps.fit(img, dimensions, method=Image.LANCZOS)
-
