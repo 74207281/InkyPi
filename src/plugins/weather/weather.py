@@ -4,12 +4,13 @@ import os
 import requests
 import logging
 from datetime import datetime, timedelta, timezone, date
-from astral import moon
+from astral import moon, LocationInfo
+from astral.sun import sun
 import pytz
 from io import BytesIO
 import math
-from shapely.geometry import shape, Point
-import geopandas as gpd
+import json
+import re
 
 logger = logging.getLogger(__name__)
         
@@ -50,19 +51,38 @@ UNITS = {
     }
 }
 
-# Forcast data link
-# 3 day forcast
-city_list = ['宜蘭縣','桃園市','新竹縣','苗栗縣','彰化縣','南投縣','雲林縣',
-             '嘉義縣','屏東縣','臺東縣','花蓮縣','澎湖縣','基隆市','新竹市',
-             '嘉義市','臺北市','高雄市','新北市','臺中市','臺南市','金門縣','連江縣']
-FORCAST_3_DAY = {name : f'F-D0047-{((i*4)+1):03d}' for i , name in enumerate(city_list)}
-FORCAST_7_DAY = {name : f'F-D0047-{((i*4)+3):03d}' for i , name in enumerate(city_list)}
+# CWA Forecast datasets mapping for 22 counties in Taiwan
+CWA_COUNTY_DATASETS = {
+    '宜蘭縣': {'3_day': 'F-D0047-001', '7_day': 'F-D0047-003'},
+    '桃園市': {'3_day': 'F-D0047-005', '7_day': 'F-D0047-007'},
+    '新竹縣': {'3_day': 'F-D0047-009', '7_day': 'F-D0047-011'},
+    '苗栗縣': {'3_day': 'F-D0047-013', '7_day': 'F-D0047-015'},
+    '彰化縣': {'3_day': 'F-D0047-017', '7_day': 'F-D0047-019'},
+    '南投縣': {'3_day': 'F-D0047-021', '7_day': 'F-D0047-023'},
+    '雲林縣': {'3_day': 'F-D0047-025', '7_day': 'F-D0047-027'},
+    '嘉義縣': {'3_day': 'F-D0047-029', '7_day': 'F-D0047-031'},
+    '屏東縣': {'3_day': 'F-D0047-033', '7_day': 'F-D0047-035'},
+    '臺東縣': {'3_day': 'F-D0047-037', '7_day': 'F-D0047-039'},
+    '花蓮縣': {'3_day': 'F-D0047-041', '7_day': 'F-D0047-043'},
+    '澎湖縣': {'3_day': 'F-D0047-045', '7_day': 'F-D0047-047'},
+    '基隆市': {'3_day': 'F-D0047-049', '7_day': 'F-D0047-051'},
+    '新竹市': {'3_day': 'F-D0047-053', '7_day': 'F-D0047-055'},
+    '嘉義市': {'3_day': 'F-D0047-057', '7_day': 'F-D0047-059'},
+    '臺北市': {'3_day': 'F-D0047-061', '7_day': 'F-D0047-063'},
+    '高雄市': {'3_day': 'F-D0047-065', '7_day': 'F-D0047-067'},
+    '新北市': {'3_day': 'F-D0047-069', '7_day': 'F-D0047-071'},
+    '臺中市': {'3_day': 'F-D0047-073', '7_day': 'F-D0047-075'},
+    '臺南市': {'3_day': 'F-D0047-077', '7_day': 'F-D0047-079'},
+    '連江縣': {'3_day': 'F-D0047-081', '7_day': 'F-D0047-083'},
+    '金門縣': {'3_day': 'F-D0047-085', '7_day': 'F-D0047-087'},
+}
 
 WEATHER_URL = "https://api.openweathermap.org/data/3.0/onecall?lat={lat}&lon={long}&units={units}&exclude=minutely&appid={api_key}"
 AIR_QUALITY_URL = "http://api.openweathermap.org/data/2.5/air_pollution?lat={lat}&lon={long}&appid={api_key}"
 GEOCODING_URL = "http://api.openweathermap.org/geo/1.0/reverse?lat={lat}&lon={long}&limit=1&appid={api_key}"
-# Forcast URLs for CWA data
-CWA_FORECAST_URL = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/"
+# URLs for CWA and MOENV data
+CWA_BASE_URL = "https://opendata.cwa.gov.tw/api/v1/rest/datastore"
+MOENV_AQI_URL = "https://data.moenv.gov.tw/api/v2/aqx_p_432"
 
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={long}&hourly=weather_code,temperature_2m,precipitation,precipitation_probability,relative_humidity_2m,surface_pressure,visibility&daily=weathercode,temperature_2m_max,temperature_2m_min,sunrise,sunset&current=temperature,windspeed,winddirection,is_day,precipitation,weather_code,apparent_temperature&timezone=auto&models=best_match&forecast_days={forecast_days}"
 OPEN_METEO_AIR_QUALITY_URL = "https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={long}&hourly=european_aqi,uv_index,uv_index_clear_sky&timezone=auto"
@@ -73,12 +93,16 @@ OPEN_METEO_UNIT_PARAMS = {
 }
 
 class Weather(BasePlugin):
+    def __init__(self, config=None, **dependencies):
+        super().__init__(config, **dependencies)
+        self._stations_cache = None
+
     def generate_settings_template(self):
         template_params = super().generate_settings_template()
         template_params['api_key'] = {
             "required": True,
-            "service": "OpenWeatherMap",
-            "expected_key": "OPEN_WEATHER_MAP_SECRET"
+            "service": "CWA / OpenWeatherMap",
+            "expected_key": "CWA_API_KEY / OPEN_WEATHER_MAP_SECRET"
         }
         template_params['style_settings'] = True
         return template_params
@@ -127,11 +151,33 @@ class Weather(BasePlugin):
                 cwa_api = device_config.load_env_key("CWA_API_KEY")
                 moe_api = device_config.load_env_key("MOE_API_KEY")
                 if not cwa_api:
-                    raise RuntimeError("CWA API Key not configured.")
-                weather_forecast_data = self.get_cwa_forecast_data(cwa_api, units, county, district, lat, long)
-                weather_current_data = self.get_cwa_current_data(cwa_api, units, lat, long)
-                # aqi_data = self.get_air_quality(moe_api, lat, long)
-                template_params = self.parse_cwa_data(weather_forecast_data, weather_current_data ,units)
+                    raise RuntimeError("CWA API Key not configured. Please set CWA_API_KEY in the API Keys page.")
+
+                # If county or district not explicitly set, find nearest station from coordinates
+                if not county or not district:
+                    nearest_st = self.get_nearest_station(lat, long)
+                    if nearest_st:
+                        county = county or nearest_st.get('城市')
+                        addr = nearest_st.get('地址', '')
+                        m_dist = re.search(r'([^\d\s]+?[市區鄉鎮])', addr)
+                        if m_dist and not district:
+                            district = m_dist.group(1)
+
+                if settings.get('titleSelection', 'location') == 'location' or not title:
+                    title = f"{county or ''} {district or ''}".strip() or "Taiwan"
+
+                template_params = self.get_and_parse_cwa_data(
+                    cwa_api=cwa_api,
+                    moe_api=moe_api,
+                    county=county,
+                    district=district,
+                    lat=lat,
+                    long=long,
+                    units=units,
+                    tz=tz,
+                    time_format=time_format,
+                    settings=settings
+                )
             else:
                 raise RuntimeError(f"Unknown weather provider: {weather_provider}")
 
@@ -213,33 +259,7 @@ class Weather(BasePlugin):
         data['hourly_forecast'] = self.parse_open_meteo_hourly(weather_data.get('hourly', {}), units, tz, time_format, daily.get('sunrise', []), daily.get('sunset', []))
         return data
     
-    def parse_cwa_data(self, weather_forecast_data, weather_current_data, tz, units, time_format, lat):
-        current = weather_current_data['records']['Station'][0]['WeatherElement']
-        # daily = weather_forecast_data['records']['Locations'][0]['Location'][0]['WeatherElement']
-        # hourly = weather_data.get()
-        dt = datetime.fromisoformat(current.get('time')).astimezone(tz) if current.get('time') else datetime.now(tz)
-        weather_code = current.get("weather_code", 0)
-        is_day = current.get("is_day", 1)
-        current_icon = self.map_weather_code_to_icon(weather_code, is_day)
-        
-        temperature_conversion = 273.15 if units == "standard" else 0.
 
-        data = {
-            # "current_date": dt.strftime("%A, %B %d"),
-            # "current_day_icon": self.get_plugin_dir(f'icons/{current_icon}.png'),
-            # "current_temperature": str(round(current.get("temperature", 0) + temperature_conversion)),
-            # "feels_like": str(round(current.get("apparent_temperature", current.get("temperature", 0)) + temperature_conversion)),
-            # "temperature_unit": UNITS[units]["temperature"],
-            # "units": units,
-            # "time_format": time_format
-        }
-
-        data['forecast'] = self.parse_cwa_forecast(weather_forecast_data, units, tz, is_day, lat)
-        data['data_points'] = self.parse_cwa_data_points(current, aqi_data, units, tz, time_format)
-        
-        data['hourly_forecast'] = self.parse_cwa_hourly(weather_data.get('hourly', {}), units, tz, time_format, daily.get('sunrise', []), daily.get('sunset', []))
-        
-        return
     
     def map_weather_code_to_icon(self, weather_code, is_day):
 
@@ -425,53 +445,7 @@ class Weather(BasePlugin):
 
         return forecast
 
-    def parse_cwa_forecast(self, daily_data, units, tz, is_day, lat):
-        """
-        Parse the daily forecast from CWA API and calculate moon phase and illumination using the local 'astral' library.
-        """
-        times = daily_data.get('time', [])
-        weather_codes = daily_data.get('weathercode', [])
-        temp_max = daily_data.get('temperature_2m_max', [])
-        temp_min = daily_data.get('temperature_2m_min', [])
-        if units == "standard":
-            temp_max = [T + 273.15 for T in temp_max]
-            temp_min = [T + 273.15 for T in temp_min]
 
-        forecast = []
-
-        for i in range(0, len(times)): 
-            dt = datetime.fromisoformat(times[i]).replace(tzinfo=timezone.utc).astimezone(tz)
-            day_label = dt.strftime("%a")
-
-            code = weather_codes[i] if i < len(weather_codes) else 0
-            weather_icon = self.map_weather_code_to_icon(code, is_day=1)
-            weather_icon_path = self.get_plugin_dir(f"icons/{weather_icon}.png")
-
-            timestamp = int(dt.replace(hour=12, minute=0, second=0).timestamp())
-            target_date: date = dt.date() + timedelta(days=1)
-
-            try:
-                phase_age = moon.phase(target_date)
-                phase_name_north_hemi = get_moon_phase_name(phase_age)
-                LUNAR_CYCLE_DAYS = 29.530588853
-                phase_fraction = phase_age / LUNAR_CYCLE_DAYS
-                illum_pct = (1 - math.cos(2 * math.pi * phase_fraction)) / 2 * 100
-            except Exception as e:
-                logger.error(f"Error calculating moon phase for {target_date}: {e}")
-                illum_pct = 0
-                phase_name_north_hemi = "newmoon"
-            moon_icon_path = self.get_moon_phase_icon_path(phase_name_north_hemi, lat)
-
-            forecast.append({
-                "day": day_label,
-                "high": int(temp_max[i]) if i < len(temp_max) else 0,
-                "low": int(temp_min[i]) if i < len(temp_min) else 0,
-                "icon": weather_icon_path,
-                "moon_phase_pct": f"{illum_pct:.0f}",
-                "moon_phase_icon": moon_icon_path
-            })
-
-        return forecast
 
 
     def parse_hourly(self, hourly_forecast, tz, time_format, units, daily_forecast):
@@ -871,35 +845,532 @@ class Weather(BasePlugin):
         
         return response.json()
     
-    def get_cwa_forecast_data(self, api_key, county, district, lat, long):
-        url = f"{CWA_FORECAST_URL}/{FORCAST_7_DAY.get(county)}"
-        param = {"Authorization" : api_key,
-                 "format" : "JSON",
-                 "LocationName" : district,
-                 }
-        response = requests.get(url, params=param, timeout=30)
+    def normalize_county_name(self, county):
+        """Normalizes Taiwan county name and resolves common aliases."""
+        if not county:
+            return '臺北市'
+        c = county.replace('台北', '臺北').replace('台中', '臺中').replace('台南', '臺南').replace('台東', '臺東')
+        for k in CWA_COUNTY_DATASETS:
+            if k in c or c in k:
+                return k
+        return '臺北市'
+
+    def get_nearest_station(self, lat, lon):
+        """Finds nearest active weather station using station.geojson with in-memory caching."""
+        if self._stations_cache is None:
+            geojson_path = os.path.join(self.get_plugin_dir('shp/station.geojson'))
+            if os.path.exists(geojson_path):
+                try:
+                    with open(geojson_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    self._stations_cache = data.get('features', [])
+                except Exception as e:
+                    logger.error(f"Error loading station.geojson: {e}")
+                    self._stations_cache = []
+            else:
+                self._stations_cache = []
+
+        best_dist = float('inf')
+        best_station = None
+        for feat in self._stations_cache:
+            props = feat.get('properties', {})
+            # Skip decommissioned stations
+            if props.get('撤站日期'):
+                continue
+            coords = feat.get('geometry', {}).get('coordinates', [])
+            if len(coords) >= 2:
+                # coords: [lon, lat]
+                d = (coords[1] - lat)**2 + (coords[0] - lon)**2
+                if d < best_dist:
+                    best_dist = d
+                    best_station = props
+        return best_station
+
+    def get_cwa_dataset(self, api_key, dataset_id, location_name=None):
+        """Fetches dataset from CWA datastore API."""
+        url = f"{CWA_BASE_URL}/{dataset_id}"
+        params = {
+            "Authorization": api_key,
+            "format": "JSON"
+        }
+        if location_name:
+            params["LocationName"] = location_name
+
+        response = requests.get(url, params=params, timeout=30)
         if not 200 <= response.status_code < 300:
-            logger.error(f"Failed to retrieve CWA data: {response.content}")
-            raise RuntimeError("Failed to retrieve CWA data.")
+            logger.error(f"Failed to retrieve CWA dataset {dataset_id}: {response.content}")
+            raise RuntimeError(f"Failed to retrieve CWA dataset {dataset_id}")
         return response.json()
-    
-    def get_cwa_current_data(self, api_key, county, district, lat, long):
-        url = f"{CWA_FORECAST_URL}/O-A0001-001"
-        # Find nearest station
-        # Station GPD path
-        gdf = gpd.read_file(os.path.join(self.get_plugin_dir('shp/station.geojson')))
-        input_point = Point(long, lat)
-        nearest_idx = gdf.distance(input_point, align=True).idxmin()
-        station_id = gdf.loc[nearest_idx]['站號']
-        param = {"Authorization" : api_key,
-                 "format" : "JSON",
-                 "StationId" : station_id,
-                 }
-        response = requests.get(url, params=param, timeout=30)
+
+    def get_cwa_station_observation(self, api_key, station_id=None):
+        """Fetches station observation data from CWA O-A0001-001."""
+        url = f"{CWA_BASE_URL}/O-A0001-001"
+        params = {
+            "Authorization": api_key,
+            "format": "JSON"
+        }
+        if station_id:
+            params["StationId"] = station_id
+
+        response = requests.get(url, params=params, timeout=30)
         if not 200 <= response.status_code < 300:
-            logger.error(f"Failed to retrieve CWA data: {response.content}")
-            raise RuntimeError("Failed to retrieve CWA data.")
+            logger.warning(f"Failed to retrieve CWA station observation: {response.content}")
+            return None
         return response.json()
+
+    def get_cwa_or_moe_air_quality(self, moe_api, county, lat, lon):
+        """Retrieves air quality data from MOENV or falls back to Open-Meteo."""
+        if moe_api:
+            try:
+                response = requests.get(
+                    MOENV_AQI_URL,
+                    params={"api_key": moe_api, "limit": 1000, "sort": "ImportDate desc", "format": "json"},
+                    timeout=15
+                )
+                if 200 <= response.status_code < 300:
+                    data = response.json()
+                    records = data.get("records", [])
+                    # Match by county
+                    for rec in records:
+                        if rec.get("county") and (rec.get("county") in county or county in rec.get("county")):
+                            aqi_str = rec.get("aqi")
+                            if aqi_str and aqi_str.isdigit():
+                                return {"aqi": int(aqi_str), "status": rec.get("status", "")}
+            except Exception as e:
+                logger.warning(f"Failed to fetch MOENV AQI data: {e}")
+
+        # Fallback to Open-Meteo Air Quality
+        try:
+            return self.get_open_meteo_air_quality(lat, lon)
+        except Exception as e:
+            logger.warning(f"Failed to fetch Open-Meteo AQI fallback: {e}")
+            return {}
+
+    def map_cwa_weather_code_to_icon(self, code, text="", is_day=1):
+        """Maps CWA weather code (01-42) or Chinese weather description to icon name."""
+        try:
+            code_num = int(code)
+        except (ValueError, TypeError):
+            code_num = None
+
+        icon = "01d"
+        if code_num is not None:
+            if code_num in [1]:
+                icon = "01d"
+            elif code_num in [2]:
+                icon = "022d"
+            elif code_num in [3]:
+                icon = "02d"
+            elif code_num in [4, 5, 6]:
+                icon = "02d"
+            elif code_num in [7]:
+                icon = "04d"
+            elif code_num in [8, 9, 10, 11, 12, 13, 14, 19, 20, 21, 22]:
+                icon = "10d"
+            elif code_num in [15, 16, 17, 18, 23, 24, 25, 26, 27, 28, 33, 34, 35, 36]:
+                icon = "11d"
+            elif code_num in [31, 32, 38, 39]:
+                icon = "50d"
+            elif code_num in [37, 41, 42]:
+                icon = "13d"
+        elif text:
+            if "雷" in text:
+                icon = "11d"
+            elif "雪" in text or "雹" in text:
+                icon = "13d"
+            elif "雨" in text:
+                icon = "10d"
+            elif "霧" in text:
+                icon = "50d"
+            elif "陰" in text:
+                icon = "04d"
+            elif "多雲" in text:
+                icon = "02d"
+            elif "晴" in text:
+                icon = "01d"
+
+        if is_day == 0:
+            if icon == "01d":
+                icon = "01n"
+            elif icon == "022d":
+                icon = "022n"
+            elif icon == "02d":
+                icon = "02n"
+            elif icon == "10d":
+                icon = "10n"
+
+        return icon
+
+    def get_and_parse_cwa_data(self, cwa_api, moe_api, county, district, lat, long, units, tz, time_format, settings):
+        """Fetches CWA forecast & observation data and parses into template parameters."""
+        normalized_county = self.normalize_county_name(county)
+        dataset_info = CWA_COUNTY_DATASETS.get(normalized_county, CWA_COUNTY_DATASETS['臺北市'])
+
+        # 1. Fetch 3-day forecast (3-hour intervals)
+        forecast_3_day_data = self.get_cwa_dataset(cwa_api, dataset_info['3_day'], district)
+
+        # 2. Fetch 7-day forecast (daily intervals)
+        forecast_7_day_data = self.get_cwa_dataset(cwa_api, dataset_info['7_day'], district)
+
+        # 3. Fetch station observation
+        nearest_station = self.get_nearest_station(lat, long)
+        station_id = nearest_station.get('站號') if nearest_station else None
+        current_station_data = self.get_cwa_station_observation(cwa_api, station_id) if station_id else None
+
+        # 4. Fetch air quality
+        aqi_data = self.get_cwa_or_moe_air_quality(moe_api, normalized_county, lat, long)
+
+        # 5. Parse and assemble
+        now = datetime.now(tz)
+
+        # Helper to extract location dictionary
+        def extract_location(records):
+            locs = records.get("locations") or records.get("Locations") or []
+            if not locs:
+                return {}
+            loc_list = locs[0].get("location") or locs[0].get("Location") or []
+            if not loc_list:
+                return {}
+            if district:
+                for loc in loc_list:
+                    name = loc.get("locationName") or loc.get("LocationName") or ""
+                    if name == district or district in name or name in district:
+                        return loc
+            return loc_list[0]
+
+        loc_3d = extract_location(forecast_3_day_data.get("records", {}))
+        el_map_3d = {el.get("elementName"): el.get("time", []) for el in loc_3d.get("weatherElement", [])}
+
+        loc_7d = extract_location(forecast_7_day_data.get("records", {}))
+        el_map_7d = {el.get("elementName"): el.get("time", []) for el in loc_7d.get("weatherElement", [])}
+
+        station_elem = {}
+        stations = current_station_data.get("records", {}).get("Station", []) if current_station_data else []
+        if stations:
+            station_elem = stations[0].get("WeatherElement", {})
+
+        # Sun times via Astral
+        loc_info = LocationInfo(latitude=lat, longitude=long)
+        try:
+            s = sun(loc_info.observer, date=now.date(), tzinfo=tz)
+            sunrise_dt = s['sunrise']
+            sunset_dt = s['sunset']
+        except Exception:
+            sunrise_dt = now.replace(hour=6, minute=0, second=0)
+            sunset_dt = now.replace(hour=18, minute=0, second=0)
+
+        is_day = 1 if sunrise_dt <= now < sunset_dt else 0
+
+        def safe_float(val, min_valid=-90):
+            if val is None:
+                return None
+            try:
+                f = float(val)
+                return None if f <= min_valid else f
+            except (ValueError, TypeError):
+                return None
+
+        def convert_temp(celsius):
+            if celsius is None:
+                return 0
+            if units == "imperial":
+                return round(celsius * 9 / 5 + 32)
+            elif units == "standard":
+                return round(celsius + 273.15)
+            return round(celsius)
+
+        def convert_speed(ms):
+            if ms is None:
+                return 0
+            if units == "imperial":
+                return round(ms * 2.23694, 1)
+            return round(ms, 1)
+
+        def extract_wx(val_list):
+            text, code = "", ""
+            for item in val_list:
+                if not isinstance(item, dict):
+                    continue
+                if "weatherCode" in item:
+                    code = str(item["weatherCode"])
+                measures = item.get("measures", "")
+                val = item.get("value", "")
+                if "代碼" in measures or "code" in measures.lower():
+                    code = str(val)
+                elif "現象" in measures:
+                    text = str(val)
+                elif not text:
+                    text = str(val)
+            if not code and len(val_list) > 1 and str(val_list[1].get("value", "")).isdigit():
+                code = str(val_list[1]["value"])
+            return text, code
+
+        # Current temperature & condition
+        st_temp = safe_float(station_elem.get("AirTemperature"))
+        st_humidity = safe_float(station_elem.get("RelativeHumidity"))
+        st_pressure = safe_float(station_elem.get("AirPressure"))
+        st_wind_speed = safe_float(station_elem.get("WindSpeed"))
+        st_wind_deg = safe_float(station_elem.get("WindDirection"), min_valid=-1)
+        st_weather_text = station_elem.get("Weather", "")
+
+        fc_temp_slot = el_map_3d.get("溫度", [{}])[0].get("elementValue", [{}])[0].get("value") if el_map_3d.get("溫度") else None
+        fc_temp = safe_float(fc_temp_slot)
+
+        fc_at_slot = el_map_3d.get("體感溫度", [{}])[0].get("elementValue", [{}])[0].get("value") if el_map_3d.get("體感溫度") else None
+        fc_at = safe_float(fc_at_slot)
+
+        fc_wx_list = el_map_3d.get("天氣現象", [{}])[0].get("elementValue", []) if el_map_3d.get("天氣現象") else []
+        fc_wx_text, fc_wx_code = extract_wx(fc_wx_list)
+
+        current_celsius = st_temp if st_temp is not None else (fc_temp if fc_temp is not None else 25.0)
+        current_temp_val = convert_temp(current_celsius)
+
+        feels_like_celsius = fc_at if fc_at is not None else current_celsius
+        feels_like_val = convert_temp(feels_like_celsius)
+
+        current_icon = self.map_cwa_weather_code_to_icon(fc_wx_code, st_weather_text or fc_wx_text, is_day)
+
+        # 6. Daily forecast
+        daily_groups = {}
+        for t_item in el_map_7d.get("最高溫度", []):
+            st_str = t_item.get("startTime", "")
+            if not st_str: continue
+            d_val = datetime.fromisoformat(st_str).astimezone(tz).date()
+            v = safe_float(t_item.get("elementValue", [{}])[0].get("value"))
+            if v is not None:
+                if d_val not in daily_groups: daily_groups[d_val] = {}
+                daily_groups[d_val]["high"] = max(daily_groups[d_val].get("high", -999), v)
+
+        for t_item in el_map_7d.get("最低溫度", []):
+            st_str = t_item.get("startTime", "")
+            if not st_str: continue
+            d_val = datetime.fromisoformat(st_str).astimezone(tz).date()
+            v = safe_float(t_item.get("elementValue", [{}])[0].get("value"))
+            if v is not None:
+                if d_val not in daily_groups: daily_groups[d_val] = {}
+                daily_groups[d_val]["low"] = min(daily_groups[d_val].get("low", 999), v)
+
+        for t_item in el_map_7d.get("天氣現象", []):
+            st_str = t_item.get("startTime", "")
+            if not st_str: continue
+            dt_val = datetime.fromisoformat(st_str).astimezone(tz)
+            d_val = dt_val.date()
+            txt, code = extract_wx(t_item.get("elementValue", []))
+            if d_val not in daily_groups: daily_groups[d_val] = {}
+            if 6 <= dt_val.hour < 18 or "icon" not in daily_groups[d_val]:
+                daily_groups[d_val]["icon"] = self.map_cwa_weather_code_to_icon(code, txt, is_day=1)
+
+        today_uvi = "N/A"
+        for t_item in el_map_7d.get("紫外線指數", []):
+            st_str = t_item.get("startTime", "")
+            if not st_str: continue
+            dt_val = datetime.fromisoformat(st_str).astimezone(tz)
+            if dt_val.date() == now.date():
+                today_uvi = t_item.get("elementValue", [{}])[0].get("value", "N/A")
+                break
+
+        forecast_list = []
+        sorted_dates = sorted(daily_groups.keys())
+        if not sorted_dates:
+            sorted_dates = [now.date() + timedelta(days=i) for i in range(8)]
+
+        for d_val in sorted_dates:
+            g = daily_groups.get(d_val, {})
+            d_high = convert_temp(g.get("high", current_celsius + 3))
+            d_low = convert_temp(g.get("low", current_celsius - 3))
+            d_icon = g.get("icon", "01d")
+
+            try:
+                phase_age = moon.phase(d_val)
+                phase_name = get_moon_phase_name(phase_age)
+                LUNAR_CYCLE = 29.530588853
+                illum_pct = (1 - math.cos(2 * math.pi * (phase_age / LUNAR_CYCLE))) / 2 * 100
+            except Exception:
+                phase_name = "newmoon"
+                illum_pct = 0
+
+            forecast_list.append({
+                "day": d_val.strftime("%a"),
+                "high": int(d_high),
+                "low": int(d_low),
+                "icon": self.get_plugin_dir(f"icons/{d_icon}.png"),
+                "moon_phase_pct": f"{illum_pct:.0f}",
+                "moon_phase_icon": self.get_moon_phase_icon_path(phase_name, lat)
+            })
+
+        while len(forecast_list) < 8:
+            last_d = now.date() + timedelta(days=len(forecast_list))
+            forecast_list.append({
+                "day": last_d.strftime("%a"),
+                "high": int(current_temp_val + 2),
+                "low": int(current_temp_val - 2),
+                "icon": self.get_plugin_dir("icons/01d.png"),
+                "moon_phase_pct": "50",
+                "moon_phase_icon": self.get_moon_phase_icon_path("fullmoon", lat)
+            })
+
+        # 7. Hourly forecast (24 hours)
+        raw_hourly = []
+        temp_slots = el_map_3d.get("溫度", [])
+        pop_slots = el_map_3d.get("3小時降雨機率", [])
+        wx_slots = el_map_3d.get("天氣現象", [])
+
+        for i, t_slot in enumerate(temp_slots):
+            dt_str = t_slot.get("dataTime") or t_slot.get("startTime")
+            if not dt_str: continue
+            dt_pt = datetime.fromisoformat(dt_str).astimezone(tz)
+            t_c = safe_float(t_slot.get("elementValue", [{}])[0].get("value"))
+
+            pop_val = 0.0
+            if i < len(pop_slots):
+                pop_s = pop_slots[i].get("elementValue", [{}])[0].get("value")
+                try:
+                    pop_val = float(pop_s) / 100.0
+                except (ValueError, TypeError):
+                    pop_val = 0.0
+
+            txt, code = "", ""
+            if i < len(wx_slots):
+                txt, code = extract_wx(wx_slots[i].get("elementValue", []))
+
+            raw_hourly.append({
+                "dt": dt_pt,
+                "celsius": t_c if t_c is not None else current_celsius,
+                "pop": pop_val,
+                "wx_code": code,
+                "wx_text": txt
+            })
+
+        hourly_forecast = []
+        start_hour = now.replace(minute=0, second=0, microsecond=0)
+        for h_offset in range(24):
+            target_dt = start_hour + timedelta(hours=h_offset)
+            best_pt = None
+            min_diff = timedelta(days=999)
+            for pt in raw_hourly:
+                diff = abs(pt["dt"] - target_dt)
+                if diff < min_diff:
+                    min_diff = diff
+                    best_pt = pt
+
+            if best_pt:
+                pt_celsius = best_pt["celsius"]
+                pt_pop = best_pt["pop"]
+                pt_code = best_pt["wx_code"]
+                pt_txt = best_pt["wx_text"]
+            else:
+                pt_celsius = current_celsius
+                pt_pop = 0.0
+                pt_code = ""
+                pt_txt = ""
+
+            try:
+                pt_s = sun(loc_info.observer, date=target_dt.date(), tzinfo=tz)
+                pt_is_day = 1 if pt_s['sunrise'] <= target_dt < pt_s['sunset'] else 0
+            except Exception:
+                pt_is_day = 1 if 6 <= target_dt.hour < 18 else 0
+
+            icon_name = self.map_cwa_weather_code_to_icon(pt_code, pt_txt, pt_is_day)
+            temp_out = convert_temp(pt_celsius)
+
+            hourly_forecast.append({
+                "time": self.format_time(target_dt, time_format, hour_only=True),
+                "temperature": int(temp_out),
+                "precipitation": pt_pop,
+                "rain": 0.0,
+                "icon": self.get_plugin_dir(f"icons/{icon_name}.png")
+            })
+
+        # 8. Data Points
+        data_points = []
+
+        data_points.append({
+            "label": "Sunrise",
+            "measurement": self.format_time(sunrise_dt, time_format, include_am_pm=False),
+            "unit": "" if time_format == "24h" else sunrise_dt.strftime('%p'),
+            "icon": self.get_plugin_dir('icons/sunrise.png')
+        })
+
+        data_points.append({
+            "label": "Sunset",
+            "measurement": self.format_time(sunset_dt, time_format, include_am_pm=False),
+            "unit": "" if time_format == "24h" else sunset_dt.strftime('%p'),
+            "icon": self.get_plugin_dir('icons/sunset.png')
+        })
+
+        wind_spd = convert_speed(st_wind_speed if st_wind_speed is not None else 1.5)
+        wind_arrow = self.get_wind_arrow(st_wind_deg if st_wind_deg is not None else 0)
+        data_points.append({
+            "label": "Wind",
+            "measurement": wind_spd,
+            "unit": UNITS[units]["speed"],
+            "icon": self.get_plugin_dir('icons/wind.png'),
+            "arrow": wind_arrow
+        })
+
+        hum_val = int(st_humidity) if st_humidity is not None else 70
+        data_points.append({
+            "label": "Humidity",
+            "measurement": hum_val,
+            "unit": "%",
+            "icon": self.get_plugin_dir('icons/humidity.png')
+        })
+
+        press_val = round(st_pressure) if st_pressure is not None else 1013
+        data_points.append({
+            "label": "Pressure",
+            "measurement": press_val,
+            "unit": "hPa",
+            "icon": self.get_plugin_dir('icons/pressure.png')
+        })
+
+        data_points.append({
+            "label": "UV Index",
+            "measurement": today_uvi,
+            "unit": "",
+            "icon": self.get_plugin_dir('icons/uvi.png')
+        })
+
+        vis_val = 10.0 if units != "imperial" else 6.2
+        data_points.append({
+            "label": "Visibility",
+            "measurement": f"≥{vis_val:.1f}",
+            "unit": UNITS[units]["distance"],
+            "icon": self.get_plugin_dir('icons/visibility.png')
+        })
+
+        aqi_val = 35
+        aqi_scale = "Good"
+        if isinstance(aqi_data, dict):
+            if "aqi" in aqi_data:
+                aqi_val = aqi_data["aqi"]
+                aqi_scale = aqi_data.get("status") or ["Good", "Fair", "Moderate", "Poor", "Very Poor", "Ext Poor"][min(int(aqi_val) // 20, 5)]
+            elif "hourly" in aqi_data:
+                aqi_list = aqi_data.get("hourly", {}).get("european_aqi", [])
+                if aqi_list:
+                    aqi_val = round(aqi_list[0], 1)
+                    scales = ["Good", "Fair", "Moderate", "Poor", "Very Poor", "Ext Poor"]
+                    aqi_scale = scales[min(int(aqi_val) // 20, 5)]
+
+        data_points.append({
+            "label": "Air Quality",
+            "measurement": aqi_val,
+            "unit": aqi_scale,
+            "icon": self.get_plugin_dir('icons/aqi.png')
+        })
+
+        return {
+            "current_date": now.strftime("%A, %B %d"),
+            "current_day_icon": self.get_plugin_dir(f"icons/{current_icon}.png"),
+            "current_temperature": str(round(current_temp_val)),
+            "feels_like": str(round(feels_like_val)),
+            "temperature_unit": UNITS[units]["temperature"],
+            "units": units,
+            "time_format": time_format,
+            "forecast": forecast_list,
+            "data_points": data_points,
+            "hourly_forecast": hourly_forecast
+        }
 
     def format_time(self, dt, time_format, hour_only=False, include_am_pm=True):
         """Format datetime based on 12h or 24h preference"""

@@ -12,14 +12,11 @@
     <div class="form-group">
         <span>Longitude </span>
         <input type="text" id="longitude" name="longitude" class="form-input" />
-        <button id="findButton">尋找</button>
+        <button type="button" id="findButton">尋找</button>
     </div>
     <div class="form-group">
-        <!-- <span>縣市</span> -->
-        <!-- <input readonly type="text" id="county" name="county" class="form-input" /> -->
-            <!-- <span>縣市 </span> -->
-    <label for="county">縣市：</label>
-        <select id="county" onchange="updateDistrict()">
+        <label for="county">縣市：</label>
+        <select id="county" name="county" onchange="updateDistrict()">
             <option value="">選擇縣市</option>
             <option value="基隆市">基隆市</option>
             <option value="臺北市">臺北市</option>
@@ -41,16 +38,13 @@
             <option value="澎湖縣">澎湖縣</option>
             <option value="金門縣">金門縣</option>
             <option value="連江縣">連江縣</option>
-            <option value="基隆市">基隆市</option>
             <option value="新竹市">新竹市</option>
             <option value="嘉義市">嘉義市</option>
         </select>
     </div>
     <div class="form-group">
-        <!-- <span>鄉鎮市區 </span> -->
-        <!-- <input readonly type="text" id="town" name="town" class="form-input" /> -->
         <label for="district">鄉鎮市區：</label>
-        <select id="district">
+        <select id="district" name="district">
             <option value="">請先選擇縣市</option>
         </select>
     </div>
@@ -267,22 +261,27 @@
             // Show API Key required label for OpenWeatherMap
             if (apiKeyLabel) apiKeyLabel.style.display = '';
         } else if (provider === 'CWA'){
-            titleLocationRadio.style.display = 'none';
-            titleLocationLabel.style.display = 'none';
-            titleLocationRadio.disabled = true;
-            titleTimeZone.style.display = 'none';
-            titleTimeZoneLabel.style.display = 'none';
-            titleTimeZone.disabled = true;
-            selectForecastDays.options[1].style.display = 'none';
-            selectForecastDays.options[1].disabled = true;
-            
-            // Select and enable "Custom"
-            titleCustomRadio.checked = true;
+            titleLocationRadio.style.display = '';
+            titleLocationLabel.style.display = '';
+            titleLocationRadio.disabled = false;
+
             titleCustomRadio.disabled = false;
             customTitleInput.disabled = false;
 
-            // Hide API Key required label for CWA
-            if (apiKeyLabel) apiKeyLabel.style.display = 'none';
+            titleTimeZone.style.display = 'none';
+            titleTimeZoneLabel.style.display = 'none';
+            titleTimeZone.disabled = true;
+
+            selectForecastDays.options[0].disabled = false; // 3 days
+            selectForecastDays.options[1].style.display = 'none';
+            selectForecastDays.options[1].disabled = true;
+            selectForecastDays.options[2].disabled = false; // 7 days
+
+            // Show API Key required label for CWA
+            if (apiKeyLabel) {
+                apiKeyLabel.style.display = '';
+                apiKeyLabel.setAttribute('title', 'CWA (Set CWA_API_KEY in .env or API Keys page)');
+            }
         }
     }
 
@@ -330,10 +329,18 @@
         });
 
         if (loadPluginSettings) {
-            document.getElementById('latitude').value = pluginSettings.latitude;
-            document.getElementById('longitude').value = pluginSettings.longitude;
+            document.getElementById('latitude').value = pluginSettings.latitude || '';
+            document.getElementById('longitude').value = pluginSettings.longitude || '';
 
-            document.getElementById('units').value = pluginSettings.units;
+            if (pluginSettings.county) {
+                document.getElementById('county').value = pluginSettings.county;
+                updateDistrict();
+                if (pluginSettings.district) {
+                    document.getElementById('district').value = pluginSettings.district;
+                }
+            }
+
+            document.getElementById('units').value = pluginSettings.units || 'metric';
 
             document.getElementById('displayRefreshTime').checked = pluginSettings.displayRefreshTime;
             document.getElementById('displayRefreshTime').value = pluginSettings.displayRefreshTime;
@@ -361,12 +368,12 @@
             document.getElementById('weatherTimeZone').value = pluginSettings.weatherTimeZone;
             
             selectedTitle = pluginSettings.titleSelection || 'location';
-            weatherProvider = pluginSettings.weatherProvider || 'OpenMeteo';
+            weatherProvider = pluginSettings.weatherProvider || 'CWA';
 
             document.getElementById('customTitle').value = pluginSettings.customTitle || '';
         } else {
             // set default values
-            document.getElementById('units').value = "imperial";
+            document.getElementById('units').value = "metric";
             document.getElementById('displayRefreshTime').checked = true;
             document.getElementById('displayRefreshTime').value = "true";
             document.getElementById('displayMetrics').checked = true;
@@ -387,107 +394,80 @@
 
         document.getElementById('weatherProvider').value = weatherProvider;
         document.querySelector(`input[name="titleSelection"][value="${selectedTitle}"]`).checked = true;
-        updateTitleOptions(weatherProvider)
+        updateTitleOptions(weatherProvider);
     });
 
     document.getElementById('district').addEventListener('change', function(e) {
         const selectedName = e.target.value;
-        // const outputSpan = document.getElementById('output');
-        const lngInput = document.getElementById('latitude');
-        const latInput = document.getElementById('longitude');
+        const selectedCounty = document.getElementById('county').value;
+        const latInput = document.getElementById('latitude');
+        const lngInput = document.getElementById('longitude');
 
         if (!geojsonData) {
-                alert("Data is still loading, please wait a moment.");
-                return;
-            }
-
-        // Prevent errors if the user clicks before the file finishes loading
-
-        if (!selectedName) {
-            alert("None");
+            console.warn("Data is still loading, please wait a moment.");
             return;
         }
 
-        // Find the selected county
+        if (!selectedName) {
+            return;
+        }
+
+        // Find the selected county + district
         const selectedFeature = geojsonData.features.find(
-            feature => feature.properties.TOWNNAME === selectedName // Ensure "name" matches your GeoJSON properties
+            feature => (!selectedCounty || feature.properties.COUNTYNAME === selectedCounty) &&
+                       feature.properties.TOWNNAME === selectedName
         );
 
         if (selectedFeature) {
-            // Calculate and display
             const centroid = turf.centroid(selectedFeature);
-            const lng = centroid.geometry.coordinates[1];
-            const lat = centroid.geometry.coordinates[0];
+            const lng = centroid.geometry.coordinates[0];
+            const lat = centroid.geometry.coordinates[1];
 
-            // outputSpan.textContent = `Longitude: ${lng.toFixed(4)}, Latitude: ${lat.toFixed(4)}`;
-            lngInput.value = lng.toFixed(4);
             latInput.value = lat.toFixed(4);
+            lngInput.value = lng.toFixed(4);
         } else {
-            alert("County data not found.");
+            console.warn("District geometry not found in GeoJSON.");
         }
     });
-    document.getElementById('findButton').addEventListener('click', function() {
-            const countyOutput = document.getElementById('county');
-            const districtOutput = document.getElementById('district');
-            
-            if (!geojsonData) {
-                alert("Please enter a valid numeric Longitude and Latitude first.");
-                return;
+
+    document.getElementById('findButton').addEventListener('click', function(e) {
+        e.preventDefault();
+        const countyOutput = document.getElementById('county');
+        const districtOutput = document.getElementById('district');
+        
+        if (!geojsonData) {
+            alert("Data is still loading, please wait a moment.");
+            return;
+        }
+
+        const lng = parseFloat(document.getElementById('longitude').value);
+        const lat = parseFloat(document.getElementById('latitude').value);
+
+        if (isNaN(lng) || isNaN(lat)) {
+            alert("Please enter a valid numeric Longitude and Latitude first.");
+            return;
+        }
+
+        const searchPoint = turf.point([lng, lat]);
+        let foundCountyName = null;
+        let foundDistrictName = null;
+
+        for (let feature of geojsonData.features) {
+            if (turf.booleanPointInPolygon(searchPoint, feature)) {
+                foundCountyName = feature.properties.COUNTYNAME;
+                foundDistrictName = feature.properties.TOWNNAME;
+                break;
             }
+        }
 
-            // Grab the input values and convert them to numbers
-            const lng = parseFloat(document.getElementById('longitude').value);
-            const lat = parseFloat(document.getElementById('latitude').value);
-
-            // Basic validation
-            if (isNaN(lng) || isNaN(lat)) {
-                alert("Please enter a valid numeric Longitude and Latitude first.");
-                return;
-            }
-            console.log(`Searching for county containing point: (${lng}, ${lat})`);
-
-            // 3. Create a Turf.js "Point" feature from the inputs
-            // Remember: Turf always wants [Longitude, Latitude]
-            const searchPoint = turf.point([lng, lat]);
-
-            let foundCountyName = "Not Found (Outside boundaries)";
-            let foundDistrictName = "Not Found (Outside boundaries)";
-
-            // 4. Loop through every county polygon to see if the point is inside it
-            for (let feature of geojsonData.features) {
-                
-                // Turf checks if the point is physically inside this specific polygon
-                const isInside = turf.booleanPointInPolygon(searchPoint, feature);
-                
-                if (isInside) {
-                    // Match found! Extract the name from the properties
-                    foundCountyName = feature.properties.COUNTYNAME; // Make sure 'name' matches your file's property key
-                    foundDistrictName = feature.properties.TOWNNAME; // Make sure 'district' matches your file's property key
-                    break; // Stop looking once we find a match
-                }
-            }
-            console.log(`Found county: ${foundCountyName}`);
-            console.log(`Found district: ${foundDistrictName}`);
-            // 5. Output the result to the text box
-            // countyOutput.value = foundCountyName;
-            // districtOutput.value = foundDistrictName;
-            if (foundCountyName) {
-                // UPDATE THE SINGLE DROPDOWN VALUE
-                countyOutput.value = foundCountyName;
-                districtOutput.value = foundDistrictName;
-                
-                // If the coordinate typed wasn't exact, this updates the boxes 
-                // to match the exact geometric centroid of that found county.
-                // (Optional: remove the next line if you want to preserve the user's custom typed inputs)
-                // countyOutput.dispatchEvent(new Event('change'));
-                districtOutput.dispatchEvent(new Event('change'));
-
-            } else {
-                // If it doesn't match any polygon, clear the dropdown selection
-                countyOutput.value = "";
-                alert("Those coordinates are outside of our mapped county boundaries.");
-            }
-        });
+        if (foundCountyName) {
+            countyOutput.value = foundCountyName;
+            updateDistrict();
+            districtOutput.value = foundDistrictName;
+        } else {
+            alert("Those coordinates are outside of our mapped county boundaries.");
+        }
+    });
 </script>
 
 <!-- 25.0640 -->
